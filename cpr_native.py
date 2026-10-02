@@ -277,7 +277,8 @@ class Reader:
             if flags & ~2:
                 raise NativeError(f'{name}: unsupported event flags 0x{flags:x}')
             if not all(math.isfinite(v) for v in (start, duration, offset)) or start < 0 or duration <= 0 or offset < 0:
-                raise NativeError(f'{name}: invalid clip timing')
+                raise NativeError(f'{name}: invalid clip timing '
+                                  f'(start={start:g}, length={duration:g}, offset={offset:g}, record={record.payload})')
             result.append(dict(name=description, flags=flags, start=start, duration=duration, offset=offset,
                                clip=clip, priority=priority, header=header.hex(), tail=tail.hex(),
                                record_offset=record.payload, domain=domain, gain=gain))

@@ -7,16 +7,60 @@ import unittest
 import wave
 import xml.etree.ElementTree as ET
 import zipfile
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import soundfile as sf
 
 from cpr_native import Reader, NativeError
-from cpr_export import materialize, wav_info, filename_for_song, prepare_song
+from cpr_export import materialize, wav_info, filename_for_song, prepare_song, export_song, SongTrackError
 from cubase_to_cubasis import Clip, Track, ConversionError, write_project
 
 
 class NativeExportTests(unittest.TestCase):
+    def test_excluded_error_track_is_not_decoded_and_is_reported_in_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            wav = folder / 'good.wav'
+            sf.write(wav, np.zeros(8), 48000, subtype='PCM_16')
+            source = dict(name=wav.name, directory=str(folder), frames=8, bits=16,
+                          channels=1, sample_rate=48000, record_offset=10)
+            clip = dict(offset=20, name='good', segments=[dict(source=source, start=0, offset=0, length=8)])
+            event = dict(clip=clip, start=0, duration=8, offset=0, flags=0, gain=1,
+                         domain=0, priority=0, record_offset=30, name='good')
+            good = dict(name='Vocal', offset=100, path=['Song120', 'Vocal'])
+            bad = dict(name='Click', offset=200, path=['Song120', 'Click'])
+            song = dict(id='song', name='Song120', path=['Song120'], audio_tracks=[good, bad])
+
+            def track_events(track):
+                if track['offset'] == 200:
+                    raise NativeError('unsupported event type MAudioPartEvent')
+                return [event]
+
+            reader = SimpleNamespace(path=folder / 'example.cpr', inventory=dict(
+                folders=[song], source_sha256='fixture'), track_events=Mock(side_effect=track_events))
+            with self.assertRaises(SongTrackError) as failure:
+                prepare_song(reader, 'song', 120)
+            self.assertEqual(failure.exception.track_offset, 200)
+            self.assertEqual(failure.exception.track_path, bad['path'])
+            reader.track_events.reset_mock()
+            plan = prepare_song(reader, 'song', 120, excluded_track_offsets={200})
+            reader.track_events.assert_called_once_with(good)
+            self.assertEqual(plan.excluded_tracks, [bad])
+            output = folder / 'result.dawproject'
+            report = export_song(plan, output)
+            self.assertEqual([t['name'] for t in report['tracks']], ['Vocal'])
+            self.assertEqual(report['source']['excluded_tracks'], [dict(path=bad['path'], offset=200)])
+            self.assertTrue(any('Tracks excluded by user' in w for w in report['warnings']))
+            with zipfile.ZipFile(output) as z:
+                self.assertIsNone(z.testzip())
+                self.assertEqual(len(ET.fromstring(z.read('project.xml')).findall('.//Clip')), 1)
+            reader.track_events.reset_mock()
+            with self.assertRaisesRegex(NativeError, 'Check at least one'):
+                prepare_song(reader, 'song', 120, excluded_track_offsets={100, 200})
+            reader.track_events.assert_not_called()
+
     def test_reconstructed_segments_and_gap_are_sample_exact(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

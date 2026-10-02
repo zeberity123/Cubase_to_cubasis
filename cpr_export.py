@@ -1,7 +1,7 @@
 """Native CPR audio export, using the Cubasis-tested DAWproject writer."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from pathlib import Path, PureWindowsPath
 import re
@@ -66,9 +66,17 @@ class SongPlan:
     resolved: dict
     sources: dict
     warnings: list
+    excluded_tracks: list = field(default_factory=list)
 
 
-def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None):
+class SongTrackError(NativeError):
+    def __init__(self, folder, track, cause):
+        super().__init__(f'{folder["name"]} / {track["name"]}: {cause}')
+        self.track_offset = track['offset']
+        self.track_path = track['path']
+
+
+def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None, excluded_track_offsets=None):
     if not math.isfinite(bpm) or not 1 <= bpm <= 1000:
         raise NativeError('Enter a BPM between 1 and 1000')
     folder = next((f for f in reader.inventory['folders'] if f['id'] == folder_id), None)
@@ -76,8 +84,12 @@ def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None):
         raise NativeError('Folder is not in the loaded project')
     tracks, sources, resolved = [], {}, {}
     warnings = []
+    excluded = set(excluded_track_offsets or ())
+    excluded_tracks = [track for track in folder['audio_tracks'] if track['offset'] in excluded]
     for track in folder['audio_tracks']:
         check_cancel(cancel)
+        if track['offset'] in excluded:
+            continue
         try:
             events = reader.track_events(track)
             for event in events:
@@ -112,17 +124,20 @@ def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None):
             for event in events:
                 maximum = sources[event['clip']['offset']]['frames']
                 if event['offset'] + event['duration'] > maximum + 1:
-                    raise NativeError(f'{track["name"]}: an audio event extends beyond its source; time-stretched or otherwise unsupported timing needs a Cubase-rendered source')
+                    raise NativeError(f'{track["name"]}: an audio event extends beyond its source; time-stretched or otherwise unsupported timing needs a Cubase-rendered source '
+                                      f'(offset={event["offset"]:g}, length={event["duration"]:g}, source={maximum} samples)')
             tracks.append((track, events))
         except NativeError as exc:
-            raise NativeError(f'{folder["name"]} / {track["name"]}: {exc}') from exc
+            raise SongTrackError(folder, track, exc) from exc
     if not tracks or not any(events for _, events in tracks):
-        raise NativeError('The selected folder has no audio clips')
+        raise NativeError('The selected tracks have no audio clips. Check at least one audio track with clips.')
+    if excluded_tracks:
+        warnings.append('Tracks excluded by user: ' + ', '.join(' / '.join(t['path']) for t in excluded_tracks))
     if any(e['flags'] & 2 for _, events in tracks for e in events):
         warnings.append('Event mute flag 0x0002 is exported as disabled clips. Track/folder mixer mute and solo are not transferred.')
     if any(not math.isclose(e['gain'], 1.0, abs_tol=1e-7) for _, events in tracks for e in events):
         warnings.append('Clip gain is baked into separate trimmed 32-bit float WAVs.')
-    return SongPlan(reader, folder, bpm, tracks, resolved, sources, warnings)
+    return SongPlan(reader, folder, bpm, tracks, resolved, sources, warnings, excluded_tracks)
 
 
 def copy_frames(src, dst, count, frame_size, cancel, gain=1):
@@ -222,6 +237,7 @@ def export_song(plan, output, cancel=None, progress=None, status=None):
             tracks.append(Track(' / '.join(relative), clips))
         source_info = dict(cpr=str(plan.reader.path), sha256=plan.reader.inventory['source_sha256'],
                            folder=plan.folder['path'], positions='Original track positions; musical positions evaluated at selected song BPM',
+                           excluded_tracks=[dict(path=t['path'], offset=t['offset']) for t in plan.excluded_tracks],
                            input_audio=[str(path) for path, _ in plan.resolved.values()])
         return write_project(tracks, media, output, plan.bpm, warnings=plan.warnings,
                              progress=progress, cancel=cancel, source_info=source_info)
