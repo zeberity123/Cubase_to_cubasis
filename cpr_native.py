@@ -229,14 +229,86 @@ class Reader:
         self.clips[record.payload] = result
         return result
 
-    def track_events(self, track):
-        node = self.obj(track['offset'])
-        name, p = self.string(node.payload, node.end)
+    def linear_curve(self, record):
+        if record.cls != 'MLinearInterpolator':
+            raise NativeError(f'Unsupported event curve {record.cls}')
+        count = self.u32(record.payload)
+        if not 1 <= count <= 100000 or record.payload + 4 + count * 16 + 32 != record.end:
+            raise NativeError('Unsupported linear curve layout')
+        points = [(self.f64(record.payload + 4 + i * 16),
+                   self.f64(record.payload + 12 + i * 16)) for i in range(count)]
+        bounds = [self.f64(record.end - 32 + i * 8) for i in range(4)]
+        tolerance = max(1e-9, abs(bounds[1]) * 1e-12)
+        if (not all(math.isfinite(v) for point in points for v in point)
+                or not all(math.isfinite(v) for v in bounds)
+                or any(x < 0 or y < 0 for x, y in points)
+                or any(a[0] >= b[0] for a, b in zip(points, points[1:]))
+                or bounds[0] > points[0][0] + tolerance or bounds[1] < points[-1][0] - tolerance
+                or bounds[2] > min(y for _, y in points) + 1e-9 or bounds[3] < max(y for _, y in points) - 1e-9):
+            raise NativeError('Invalid linear event curve')
+        return dict(points=points, bounds=bounds)
+
+    def event_attributes(self, pos, limit, part=False):
+        count = self.u32(pos)
+        pos += 4
+        if count > 10000:
+            raise NativeError('Invalid event attribute count')
+        envelope = None
+        for _ in range(count):
+            self.require(pos, 6, limit)
+            tag = self.data[pos:pos+4]
+            kind = self.u16(pos+4)
+            pos += 6
+            if tag == b'vClV' and kind == 0x22 and not part and envelope is None:
+                record = self.obj(pos)
+                self.require(pos, record.next-pos, limit)
+                envelope = self.linear_curve(record)
+                pos = record.next
+            elif part and tag in (b'enaL', b'treV') and kind == 1:
+                self.require(pos, 8, limit)
+                if self.u64(pos):
+                    raise NativeError('Audio part lane/vertical edits are unsupported')
+                pos += 8
+            else:
+                raise NativeError(f'Unsupported event processing attribute {tag.hex()} (0x{kind:x})')
+        return envelope, pos
+
+    def fade(self, pos, limit, cls):
+        if not self.u32(pos):
+            self.require(pos, 4, limit)
+            return None, pos + 4
+        record = self.obj(pos)
+        self.require(pos, record.next-pos, limit)
+        if record.cls != cls:
+            raise NativeError(f'Expected {cls}, found {record.cls}')
+        q = record.payload
+        if self.u32(q):
+            curve = self.obj(q)
+            result = self.linear_curve(curve)
+            q = curve.next
+            points = result['points']
+            expected = (0.0, 1.0) if cls == 'MFadeIn' else (1.0, 0.0)
+            if (points[0][0] != 0 or points[-1][0] <= 0
+                    or not math.isclose(points[0][1], expected[0], abs_tol=1e-10)
+                    or not math.isclose(points[-1][1], expected[1], abs_tol=1e-10)):
+                raise NativeError('Unsupported fade curve endpoints')
+        else:
+            result = None
+            q += 4  # Empty fade object: no fade curve, not a missing edit.
+        self.require(q, 8, record.end)
+        if q + 8 != record.end or self.f64(q) != 0.5:
+            raise NativeError('Unsupported fade shape parameter')
+        return result, record.next
+
+    def node_events(self, node, name, depth=0):
+        if depth > 16:
+            raise NativeError('Audio parts are nested too deeply')
+        _, p = self.string(node.payload, node.end)
         domain = self.u32(p)
         p += 4
         if domain == 0:
-            p = self.obj(p).next  # tempo track, possibly first inline declaration
-            p = self.obj(p).next  # signature track
+            p = self.obj(p).next
+            p = self.obj(p).next
         elif domain == 1:
             if self.f64(p) != 1:
                 raise NativeError('Unsupported linear track period')
@@ -250,39 +322,69 @@ class Reader:
         result = []
         for _ in range(count):
             record = self.obj(p)
-            if record.cls != 'MAudioEvent':
-                raise NativeError(f'{name}: unsupported event type {record.cls}')
-            q = record.payload
-            flags = self.u16(q)
-            start, duration, offset = self.f64(q+2), self.f64(q+10), self.f64(q+18)
-            clip_record = self.obj(q + 26)
-            clip = self.audio_clip(clip_record)
-            q = clip_record.next
-            # Compact event attributes use four-byte tags, unlike source attrs.
-            count_attrs = self.u32(q)
-            if count_attrs:
-                raise NativeError(f'{name}: clip envelopes or additional event processing are not supported yet')
-            self.require(q, 28, record.end)
-            header = self.data[q:q+24]
-            priority = self.u32(q+4)
-            if self.u32(q+8) or self.u32(q+12) or self.f64(q+16):
-                raise NativeError(f'{name}: fades/crossfades or additional event timing are not supported yet')
-            description, after_name = self.string(q+24, record.end)
-            tail = self.data[after_name:record.end]
-            if len(tail) != 14 or tail[:4] != bytes(4) or tail[8:] != bytes(6):
-                raise NativeError(f'{name}: pitch shift, inversion or additional event edits are not supported yet')
-            gain = struct.unpack_from('>f', tail, 4)[0]
-            if not math.isfinite(gain) or gain < 0:
-                raise NativeError('Invalid clip gain')
-            if flags & ~2:
-                raise NativeError(f'{name}: unsupported event flags 0x{flags:x}')
-            if not all(math.isfinite(v) for v in (start, duration, offset)) or start < 0 or duration <= 0 or offset < 0:
-                raise NativeError(f'{name}: invalid clip timing '
-                                  f'(start={start:g}, length={duration:g}, offset={offset:g}, record={record.payload})')
-            result.append(dict(name=description, flags=flags, start=start, duration=duration, offset=offset,
-                               clip=clip, priority=priority, header=header.hex(), tail=tail.hex(),
-                               record_offset=record.payload, domain=domain, gain=gain))
+            self.require(p, record.next-p, node.end)
+            result.extend(self.event(record, domain, name, depth))
             p = record.next
         if p != node.end:
             raise NativeError(f'{name}: trailing data after the declared event list ({node.end-p} bytes)')
-        return result
+        return domain, result
+
+    def event(self, record, domain, name, depth=0):
+        if record.cls not in ('MAudioEvent', 'MAudioPartEvent'):
+            raise NativeError(f'{name}: unsupported event type {record.cls}')
+        q = record.payload
+        self.require(q, 30, record.end)
+        flags = self.u16(q)
+        start, duration, offset = self.f64(q+2), self.f64(q+10), self.f64(q+18)
+        if flags & ~2:
+            raise NativeError(f'{name}: unsupported event flags 0x{flags:x}')
+        if not all(math.isfinite(v) for v in (start, duration, offset)) or duration <= 0 or offset < 0:
+            raise NativeError(f'{name}: invalid clip timing '
+                              f'(start={start:g}, length={duration:g}, offset={offset:g}, record={record.payload})')
+        child = self.obj(q+26)
+        if record.cls == 'MAudioPartEvent':
+            if child.cls != 'MAudioPart':
+                raise NativeError(f'Unsupported audio part node {child.cls}')
+            _, p = self.event_attributes(child.next, record.end, part=True)
+            self.require(p, 4, record.end)
+            if p + 4 != record.end:
+                raise NativeError('Unrecognized audio part trailer')
+            inner_domain, events = self.node_events(child, name, depth+1)
+            if inner_domain != domain:
+                raise NativeError('Audio part and parent use different time domains')
+            delta = start - offset
+            for event in events:
+                event['start'] += delta
+                event['flags'] |= flags
+                windows = [dict(w, start=w['start'] + delta) for w in event.get('part_windows', [])]
+                windows.append(dict(start=start, duration=duration, domain=domain, record_offset=record.payload))
+                event['part_windows'] = windows
+            return events
+        clip = self.audio_clip(child)
+        header_start = child.next
+        envelope, p = self.event_attributes(header_start, record.end)
+        priority = self.u32(p)
+        fade_in, p = self.fade(p+4, record.end, 'MFadeIn')
+        fade_out, p = self.fade(p, record.end, 'MFadeOut')
+        self.require(p, 8, record.end)
+        if self.f64(p):
+            raise NativeError(f'{name}: additional event timing is unsupported')
+        description, after_name = self.string(p+8, record.end)
+        tail = self.data[after_name:record.end]
+        if len(tail) != 14 or tail[:4] != bytes(4) or tail[8:] != bytes(6):
+            raise NativeError(f'{name}: pitch shift, inversion or additional event edits are not supported yet')
+        gain = struct.unpack_from('>f', tail, 4)[0]
+        if not math.isfinite(gain) or gain < 0:
+            raise NativeError('Invalid clip gain')
+        fade_length = sum(curve['points'][-1][0] for curve in (fade_in, fade_out) if curve)
+        if fade_length > duration + 1:
+            raise NativeError('Overlapping event fades are not supported yet')
+        return [dict(name=description, flags=flags, start=start, duration=duration, offset=offset,
+                     clip=clip, priority=priority, header=self.data[header_start:p+8].hex(), tail=tail.hex(),
+                     record_offset=record.payload, domain=domain, gain=gain,
+                     envelope=envelope, fade_in=fade_in, fade_out=fade_out)]
+
+    def track_events(self, track):
+        node = self.obj(track['offset'])
+        name, _ = self.string(node.payload, node.end)
+        return self.node_events(node, name)[1]

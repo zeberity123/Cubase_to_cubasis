@@ -248,6 +248,7 @@ def write_project(tracks, media, output, tempo, signature=(4, 4), warnings=None,
         clips = ET.SubElement(track_lanes, 'Clips', id=f'clips{i}')
         track_report = dict(name=track.name, clips=[], gaps=[], overlaps=[])
         covered_end = 0
+        has_previous_clip = False
         for clip_index, clip in enumerate(sorted(track.clips, key=lambda c: c.start_seconds), 1):
             info = media[clip.source]
             element = ET.SubElement(clips, 'Clip', name=clip.name,
@@ -264,9 +265,10 @@ def write_project(tracks, media, output, tempo, signature=(4, 4), warnings=None,
             tolerance = 1 / info['sample_rate']
             if clip.start_seconds > covered_end + tolerance:
                 track_report['gaps'].append([covered_end, clip.start_seconds])
-            elif clip.start_seconds < covered_end - tolerance:
+            elif has_previous_clip and clip.start_seconds < covered_end - tolerance:
                 track_report['overlaps'].append([clip.start_seconds, min(covered_end, end)])
-            covered_end = max(covered_end, end)
+            covered_end = max(covered_end, end) if has_previous_clip else end
+            has_previous_clip = True
             item = asdict(clip)
             item['source'] = clip.source.name
             item['end_seconds'] = end

@@ -19,7 +19,7 @@ from cpr_export import prepare_song, export_song, unique_output
 
 
 APP_NAME = 'Cubase to Cubasis — Song Exporter'
-VERSION = '0.3.3'
+VERSION = '0.3.4'
 
 
 class App:
@@ -55,6 +55,7 @@ class App:
         self.project_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.extra_path = tk.StringVar()
+        self.allow_silent_tails = tk.BooleanVar(value=False)
         self.search = tk.StringVar()
         self.bpm = tk.StringVar()
         self.status = tk.StringVar(value='Open a saved Cubase project to begin.')
@@ -119,6 +120,9 @@ class App:
         self.bpm_entry = ttk.Entry(bpm_row, textvariable=self.bpm, width=8)
         self.bpm_entry.pack(side='left')
         self.bpm.trace_add('write', self.change_bpm)
+        tails = ttk.Checkbutton(right, text='Allow silent source tails', variable=self.allow_silent_tails)
+        tails.pack(anchor='w', pady=(0, 8))
+        self.buttons.append(tails)
         ttk.Label(right, textvariable=self.track_label, font=('Segoe UI', 10, 'bold')).pack(anchor='w')
         preview_frame = ttk.Frame(right)
         preview_frame.pack(fill='both', expand=True, pady=(5, 0))
@@ -479,6 +483,7 @@ class App:
             return
         output_dir = Path(self.output_path.get())
         extra = self.extra_path.get() or None
+        allow_silent_tails = self.allow_silent_tails.get()
         self.cancel.clear()
         self.set_busy(True)
         self.cancel_button.configure(state='normal')
@@ -495,7 +500,7 @@ class App:
                     name = self.by_id[fid]['name']
                     self.events.put(('status', f'Checking {name}…'))
                     try:
-                        plan = prepare_song(reader, fid, bpm, extra, self.cancel, excluded_tracks)
+                        plan = prepare_song(reader, fid, bpm, extra, self.cancel, excluded_tracks, allow_silent_tails=allow_silent_tails)
                         output = unique_output(output_dir, name)
                         previous = [0.0]
                         def progress(done, total, media_name):
@@ -519,6 +524,7 @@ class App:
                         self.events.put(('log', f'NOT EXPORTED  {name}\n  {exc}'))
                 summary = dict(source=str(reader.path), source_sha256=reader.inventory['source_sha256'],
                                completed=completed, failed=failed, cancelled=self.cancel.is_set(),
+                               allow_silent_tails=allow_silent_tails,
                                excluded_tracks=[dict(path=t['path'], offset=t['offset'])
                                                 for fid, _ in songs for t in self.by_id[fid]['audio_tracks']
                                                 if t['offset'] in excluded_tracks])
@@ -596,6 +602,7 @@ def main():
     parser.add_argument('--export', dest='export_project', type=Path)
     parser.add_argument('--folder')
     parser.add_argument('--bpm', type=float)
+    parser.add_argument('--allow-silent-tails', action='store_true')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     if args.inspect or args.smoke_ui:
@@ -652,7 +659,7 @@ def main():
         return
     if args.export_project:
         reader = Reader(args.export_project)
-        plan = prepare_song(reader, args.folder, args.bpm)
+        plan = prepare_song(reader, args.folder, args.bpm, allow_silent_tails=args.allow_silent_tails)
         export_song(plan, args.output)
         return
     if os.name == 'nt':

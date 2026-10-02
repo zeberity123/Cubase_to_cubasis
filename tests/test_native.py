@@ -175,9 +175,10 @@ class PrivateNativeRegressionTests(unittest.TestCase):
         self.assertEqual(len(plan.resolved), 4)
         self.assertEqual(sum(len(events) for _, events in plan.tracks), 4)
 
-    def test_unsupported_envelope_is_reported_instead_of_dropped(self):
-        with self.assertRaisesRegex(NativeError, 'envelopes'):
-            prepare_song(self.reader, 'F032', 165)
+    def test_linear_envelope_is_retained_for_rendering(self):
+        folder = next(f for f in self.reader.inventory['folders'] if f['id'] == 'F032')
+        events = [e for track in folder['audio_tracks'] for e in self.reader.track_events(track)]
+        self.assertTrue(any(e.get('envelope') for e in events))
 
 
 if __name__ == '__main__':

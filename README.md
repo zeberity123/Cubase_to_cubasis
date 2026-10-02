@@ -1,8 +1,8 @@
-﻿# Cubase to Cubasis — Song Exporter 0.3.3
+﻿# Cubase to Cubasis — Song Exporter 0.3.4
 
 A standalone Windows app that reads a saved Cubase `.cpr`, shows its song folders with checkboxes, and exports each checked song as a separate `.dawproject` containing its audio. It reads the folder tree from the selected project; `song-folders.txt` is not required.
 
-Version 0.3.3 adds checkboxes for individual audio tracks, failed-track highlighting, and a **Clear / select failed songs** menu. Unchecked tracks are excluded before decoding and their omissions are recorded in the output reports. All tracks start checked. Project/output settings and the export log can be expanded when needed to leave more space for the lists.
+Version 0.3.4 adds an opt-in **Allow silent source tails** setting and native decoding and audio rendering for observed linear clip volume envelopes and fade curves, accepts empty fade objects, flattens supported audio parts, and preserves negative arrangement positions. It retains checkboxes for individual audio tracks, failed-track highlighting, and a **Clear / select failed songs** menu. Unchecked tracks are excluded before decoding and their omissions are recorded in the output reports. All tracks start checked. Project/output settings and the export log can be expanded when needed to leave more space for the lists.
 
 ## Use the Windows app
 
@@ -31,7 +31,9 @@ Track choices persist while switching folders and across retries. If the same tr
 
 The retry export deliberately omits unchecked tracks. Its `.report.json` and the batch summary record those exclusions. Use **Show log** to inspect messages. **Clear song selection** clears song checkboxes without changing track choices.
 
-This version does not add native decoding of time stretching, envelopes, fades/crossfades or audio parts. Those edits still require decoder work against representative saved CPR and Cubase XML samples, or rendered audio from Cubase. Invalid timing and source-bound errors now include numerical timing details. For audio parts, Cubase's [Dissolve Part](https://www.steinberg.help/r/cubase-artist/15.0/en/cubase_nuendo/topics/parts_events/parts_and_events_audio_parts_creating_t.html) exposes contained events as independent events; save and reopen the CPR afterward. Those events may still contain other unsupported edits.
+Linear clip volume envelopes and supported fade curves are rendered into trimmed 32-bit float WAVs. Empty fade objects are accepted without changing the audio. Supported audio parts are flattened while retaining their positions, source offsets, bounds and disabled flags. Negative arrangement positions are preserved; verify playback before zero in Cubasis.
+
+**Allow silent source tails** in the right panel fills an event's portion beyond its source WAV with silence while preserving its position, length and existing audio speed. It starts unchecked. This is an intentional alternative to Cubase playback: stretched audio that originally continued playing will become silent there. It can affect musical stems as well as click tracks. Each affected event is recorded in the report. Time stretching/AudioWarp remains unsupported; leave this setting off and render affected tracks in Cubase if you need the original stretched playback. Unknown processing attributes, unsupported fade shapes and overlapping event fades still stop that song.
 
 ## Scope of this first release
 
@@ -39,7 +41,7 @@ This is an experimental, sample-driven reader for the observed Cubase 12 CPR str
 
 - Supports ordinary mono/stereo WAV clips, PCM 16/24/32 and 32-bit float WAVs, cuts, gaps, source trims and static clip gain. Simple processed source segments are reconstructed; integer bit depths are promoted without loss when needed. Clip gain is rendered into separate float WAVs.
 - Omits MIDI, instruments, plug-ins, mixer settings, pan, track/folder mute and solo, automation, tempo changes and time-signature changes. Audio tracks use unity volume and center pan.
-- Known unsupported fades/crossfades, clip envelopes, nested audio parts, pitch edits, invalid source bounds and unknown event layouts stop that song with an error. Other selected songs continue. Time stretching/AudioWarp is not implemented; detection of every possible unsupported edit is not guaranteed.
+- Unsupported fade shapes/crossfade behavior, pitch edits, invalid source bounds and unknown event layouts stop that song with an error. Other selected songs continue. Time stretching/AudioWarp is not implemented; detection of every possible unsupported edit is not guaranteed.
 - Overlapping clips retain their geometry, but Cubase's event playback priorities are not mapped. Compare those regions in Cubasis.
 - Event flag `0x0002` is interpreted as a disabled clip. This interpretation has not yet been independently checked against a muted Cubase XML sample or on iOS.
 - This app does not recreate the Cubase mix or export a native Cubasis `.cbp` file.
@@ -56,7 +58,7 @@ Native CPR clip timing and source trims were compared with a Cubase XML export. 
 
 The new native CPR export path still needs an end-to-end playback check on your iPad. Desktop tests cannot establish that every converted song will play identically in Cubasis.
 
-Release checks: 21 automated tests passed with the private fixtures present. The packaged executable passed a hidden GUI/folder-selection check with Python absent from PATH, then exported a song with six tracks, 24 clips and six audio files. The resulting project passed both XML schemas, ZIP integrity, native clip position/length/offset comparisons and packaged audio hash checks.
+Version 0.3.4 checks: 30 automated tests passed; two private-fixture test groups were skipped. Against the supplied project, 38 previously rejected audio tracks now decode, with no regressions among 1,441 unique audio tracks. Seven of the 14 reported songs pass full-song preflight with strict source bounds; all 14 pass with silent source tails enabled. One folder requires a user-entered BPM; the preflight used a placeholder for structural checks. Representative one-track exports from each passing song passed ZIP integrity, both XML schemas, clip timing and rendered waveform sample checks. The XML exports independently confirm decoded event timing and the observed volume envelope points. These checks do not establish identical Cubase playback for all edits.
 
 ## Python tools and development
 
@@ -87,7 +89,7 @@ python -m pip install -r requirements-dev.txt
 .\build_app.ps1
 ```
 
-The build writes `dist/CubaseSongExporter.exe`, the README and runtime notices. To build separately while an existing executable is running, use `.\build_app.ps1 -OutputDirectory dist\v0.3.3`. The tested build uses Python 3.10.7, NumPy 1.23.5, SoundFile 0.12.1 and PyInstaller 6.11.0. The executable contains Python, Tcl/Tk and the audio runtime.
+The build writes `dist/CubaseSongExporter.exe`, the README and runtime notices. To build separately while an existing executable is running, use `.\build_app.ps1 -OutputDirectory dist\v0.3.4`. The tested build uses Python 3.10.7, NumPy 1.23.5, SoundFile 0.12.1 and PyInstaller 6.11.0. The executable contains Python, Tcl/Tk and the audio runtime.
 
 Tests cover clip cuts/positions, source trims, Unicode names/paths, media references, PCM reconstruction, float audio, cancellation, overwrite protection, unsupported edits and the private project's hierarchy. Private sample tests skip when their source files are unavailable. `CUBASIS_PRIVATE_CPR` optionally points to the original private regression CPR; those tests are fixture-specific, not checks for an arbitrary project. XML regression fixtures belong in the ignored `sample/` directory.
 

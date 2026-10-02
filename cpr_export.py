@@ -76,7 +76,7 @@ class SongTrackError(NativeError):
         self.track_path = track['path']
 
 
-def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None, excluded_track_offsets=None):
+def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None, excluded_track_offsets=None, allow_silent_tails=False):
     if not math.isfinite(bpm) or not 1 <= bpm <= 1000:
         raise NativeError('Enter a BPM between 1 and 1000')
     folder = next((f for f in reader.inventory['folders'] if f['id'] == folder_id), None)
@@ -119,13 +119,37 @@ def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None, excluded
                     if segment['start'] < last_end:
                         raise NativeError('Overlapping source segments are not supported yet')
                     last_end = segment['start'] + segment['length']
-                sources[clip['offset']] = dict(clip=clip, segments=segments, frames=last_end,
+                sources[clip['offset']] = dict(clip=clip, segments=segments, frames=last_end, source_frames=last_end,
                                                sample_rate=layout[0], channels=layout[1], sample_width=layout[2], subtype=layout[3])
             for event in events:
-                maximum = sources[event['clip']['offset']]['frames']
-                if event['offset'] + event['duration'] > maximum + 1:
+                event['processing_offset'] = event['offset']
+                event['processing_duration'] = event['duration']
+                rate = sources[event['clip']['offset']]['sample_rate']
+                factor = 60 / (480 * bpm) if event['domain'] == 0 else 1
+                start = event['start'] * factor
+                end = start + event['duration'] / rate
+                for window in event.get('part_windows', []):
+                    window_start = window['start'] * factor
+                    window_end = window_start + window['duration'] * factor
+                    visible_start, visible_end = max(start, window_start), min(end, window_end)
+                    if visible_end <= visible_start:
+                        raise NativeError('An event lies entirely outside its audio part; this layout needs verification')
+                    event['offset'] += (visible_start - start) * rate
+                    event['duration'] = (visible_end - visible_start) * rate
+                    event['start'] = visible_start / factor
+                    start, end = visible_start, visible_end
+                source = sources[event['clip']['offset']]
+                maximum = source['source_frames']
+                if event['offset'] + event['duration'] > maximum + 1 and not allow_silent_tails:
                     raise NativeError(f'{track["name"]}: an audio event extends beyond its source; time-stretched or otherwise unsupported timing needs a Cubase-rendered source '
                                       f'(offset={event["offset"]:g}, length={event["duration"]:g}, source={maximum} samples)')
+                if event['offset'] + event['duration'] > maximum + 1:
+                    required = math.ceil(event['offset'] + event['duration'])
+                    source['frames'] = max(source['frames'], required)
+                    event['silent_tail_frames'] = event['duration'] - max(0, maximum - event['offset'])
+                    warnings.append(f'{track["name"]}: user enabled silent source tails; '
+                                    f'{event["silent_tail_frames"] / rate:.3f}s filled with silence. '
+                                    'Original source speed is retained; Cubase stretching is not reproduced.')
             tracks.append((track, events))
         except NativeError as exc:
             raise SongTrackError(folder, track, exc) from exc
@@ -137,7 +161,53 @@ def prepare_song(reader, folder_id, bpm, extra_media=None, cancel=None, excluded
         warnings.append('Event mute flag 0x0002 is exported as disabled clips. Track/folder mixer mute and solo are not transferred.')
     if any(not math.isclose(e['gain'], 1.0, abs_tol=1e-7) for _, events in tracks for e in events):
         warnings.append('Clip gain is baked into separate trimmed 32-bit float WAVs.')
+    if any(e.get(key) for _, events in tracks for e in events for key in ('envelope', 'fade_in', 'fade_out')):
+        warnings.append('Linear clip volume envelopes and fade curves are baked into separate 32-bit float WAVs.')
+    if any(e.get('part_windows') for _, events in tracks for e in events):
+        warnings.append('Audio parts are flattened to their contained clips; part positions, bounds and disabled flags are retained.')
+    if any(e['start'] < 0 for _, events in tracks for e in events):
+        warnings.append('Negative clip positions are preserved. Verify pre-zero clip playback in Cubasis.')
     return SongPlan(reader, folder, bpm, tracks, resolved, sources, warnings, excluded_tracks)
+
+
+def event_needs_render(event):
+    return (not math.isclose(event['gain'], 1.0, abs_tol=1e-7)
+            or any(event.get(key) for key in ('envelope', 'fade_in', 'fade_out')))
+
+
+def render_event_audio(source_path, output, event, info, cancel=None):
+    start_frame = round(event['offset'])
+    count = min(round(event['duration']), info['frames'] - start_frame)
+    if count <= 0:
+        raise NativeError('The processed event has no source samples')
+    origin = event.get('processing_offset', event['offset'])
+    length = event.get('processing_duration', event['duration'])
+    with sf.SoundFile(str(source_path)) as src, sf.SoundFile(str(output), 'w', samplerate=info['sample_rate'],
+            channels=info['channels'], subtype='FLOAT') as dst:
+        src.seek(start_frame)
+        done = 0
+        while done < count:
+            check_cancel(cancel)
+            take = min(count - done, 131072)
+            audio = src.read(take, dtype='float64', always_2d=True)
+            if len(audio) != take:
+                raise NativeError('Unexpected end of event source audio')
+            positions = start_frame + done + np.arange(take, dtype='float64')
+            gains = np.full(take, event['gain'], dtype='float64')
+            for key in ('envelope', 'fade_in', 'fade_out'):
+                curve = event.get(key)
+                if not curve:
+                    continue
+                points = curve['points']
+                coordinates = positions
+                if key == 'fade_in':
+                    coordinates = positions - origin
+                elif key == 'fade_out':
+                    coordinates = positions - origin - (length - points[-1][0])
+                gains *= np.interp(coordinates, [p[0] for p in points], [p[1] for p in points])
+            dst.write(audio * gains[:, None])
+            done += take
+    return count
 
 
 def copy_frames(src, dst, count, frame_size, cancel, gain=1):
@@ -158,7 +228,7 @@ def materialize(source, resolved, destination, cancel):
     segments = source['segments']
     first = segments[0]
     original, info = resolved[first['source']['record_offset']]
-    if len(segments) == 1 and first['offset'] == 0 and first['start'] == 0 and first['length'] == info['frames']:
+    if len(segments) == 1 and first['offset'] == 0 and first['start'] == 0 and first['length'] == info['frames'] == source.get('frames', info['frames']):
         return original
     frame_size = source['channels'] * source['sample_width']
     with sf.SoundFile(str(destination), 'w', samplerate=source['sample_rate'], channels=source['channels'], subtype=source['subtype']) as dst:
@@ -175,6 +245,12 @@ def materialize(source, resolved, destination, cancel):
                 src.seek(segment['offset'])
                 copy_frames(src, dst, segment['length'], frame_size, cancel)
             cursor = segment['start'] + segment['length']
+        remaining = source.get('frames', cursor) - cursor
+        while remaining > 0:
+            check_cancel(cancel)
+            count = min(remaining, 65536)
+            dst.write(np.zeros((count, source['channels']), dtype='float64'))
+            remaining -= count
     return destination
 
 
@@ -219,14 +295,9 @@ def export_song(plan, output, cancel=None, progress=None, status=None):
                 info = {key: source[key] for key in ('frames', 'sample_rate', 'channels', 'sample_width', 'subtype')}
                 offset = event['offset'] / info['sample_rate']
                 duration = event['duration'] / info['sample_rate']
-                if not math.isclose(event['gain'], 1.0, abs_tol=1e-7):
+                if event_needs_render(event):
                     adjusted = temporary / f'gain_{event["record_offset"]}.wav'
-                    start_frame = round(event['offset'])
-                    count = min(round(event['duration']), info['frames'] - start_frame)
-                    with sf.SoundFile(str(path)) as src, sf.SoundFile(str(adjusted), 'w', samplerate=info['sample_rate'], channels=info['channels'], subtype='FLOAT') as dst:
-                        src.seek(start_frame)
-                        copy_frames(src, dst, count, info['channels'] * info['sample_width'], cancel,
-                                    event['gain'])
+                    count = render_event_audio(path, adjusted, event, info, cancel)
                     path, offset = adjusted, 0
                     info = dict(info, frames=count, sample_width=4, subtype='FLOAT')
                 media[path] = info
@@ -238,6 +309,15 @@ def export_song(plan, output, cancel=None, progress=None, status=None):
         source_info = dict(cpr=str(plan.reader.path), sha256=plan.reader.inventory['source_sha256'],
                            folder=plan.folder['path'], positions='Original track positions; musical positions evaluated at selected song BPM',
                            excluded_tracks=[dict(path=t['path'], offset=t['offset']) for t in plan.excluded_tracks],
+                           silent_source_tails=[dict(track=t['path'], record_offset=e['record_offset'],
+                                                     frames=e['silent_tail_frames'])
+                                                for t, events in plan.tracks for e in events
+                                                if e.get('silent_tail_frames')],
+                           event_processing=[dict(track=t['path'], record_offset=e['record_offset'],
+                                                  envelope=e.get('envelope'), fade_in=e.get('fade_in'),
+                                                  fade_out=e.get('fade_out'), part_windows=e.get('part_windows'))
+                                             for t, events in plan.tracks for e in events
+                                             if event_needs_render(e) or e.get('part_windows')],
                            input_audio=[str(path) for path, _ in plan.resolved.values()])
         return write_project(tracks, media, output, plan.bpm, warnings=plan.warnings,
                              progress=progress, cancel=cancel, source_info=source_info)

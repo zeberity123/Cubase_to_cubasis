@@ -141,11 +141,13 @@ class AppRetryTests(unittest.TestCase):
     def test_export_snapshots_exclusions_tracks_failures_and_clears_successful_retry(self):
         self.app.toggle('song0')
         self.app.toggle_track('1')
+        self.app.allow_silent_tails.set(True)
         failure = SongTrackError(self.folders[0], self.folders[0]['audio_tracks'][0], 'unsupported edit')
         with patch('song_exporter_app.prepare_song', side_effect=failure) as prepare:
             self.app.export()
             self.wait_until_idle()
             self.assertEqual(prepare.call_args.args[-1], frozenset({1}))
+            self.assertTrue(prepare.call_args.kwargs['allow_silent_tails'])
         self.assertEqual(self.app.failed_songs['song0']['track_offset'], 0)
         self.assertIn('failed', self.app.preview.item('0', 'tags'))
         report = json.loads(next(Path(self.temp.name).glob('export-summary-*.json')).read_text(encoding='utf-8'))
