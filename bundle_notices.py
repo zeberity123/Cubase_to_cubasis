@@ -4,7 +4,8 @@ from pathlib import Path
 import shutil
 import sys
 
-destination = Path(__file__).resolve().parent / 'dist' / 'licenses'
+output_directory = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent / 'dist'
+destination = output_directory / 'licenses'
 destination.mkdir(parents=True, exist_ok=True)
 for package in ('numpy', 'soundfile', 'cffi', 'pyinstaller', 'psutil'):
     try:

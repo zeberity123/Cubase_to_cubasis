@@ -18,7 +18,7 @@ from cpr_export import prepare_song, export_song, unique_output
 
 
 APP_NAME = 'Cubase to Cubasis — Song Exporter'
-VERSION = '0.3.0'
+VERSION = '0.3.2'
 
 
 class App:
@@ -56,20 +56,21 @@ class App:
         self.summary = tk.StringVar(value='No project loaded')
         self.selection_label = tk.StringVar(value='0 songs selected')
         self.title = tk.StringVar(value='Select a song folder')
-        self.detail = tk.StringVar(value='Parent folders stay visible in the tree.')
+        self.detail = tk.StringVar()
         frame = ttk.Frame(root, padding=20)
         frame.pack(fill='both', expand=True)
+        # Reserve the footer before the expanding list requests its space.
+        # Packing it last hides the export action on small/high-DPI windows.
+        footer = ttk.Frame(frame)
+        footer.pack(side='bottom', fill='x')
         ttk.Label(frame, text='Cubase → Cubasis', font=('Segoe UI', 23, 'bold')).pack(anchor='w')
         ttk.Label(frame, text='Export selected song folders as separate projects', font=('Segoe UI', 11)).pack(anchor='w', pady=(1, 14))
         self.buttons = []
         self.path_row(frame, 'Cubase project', self.project_path, self.browse_project, 'Open .cpr…')
         self.path_row(frame, 'Output folder', self.output_path, self.browse_output, 'Browse…')
         self.path_row(frame, 'Extra audio folder', self.extra_path, self.browse_extra, 'Optional…')
-        ttk.Label(frame, text='Audio only · Original clip positions · 4/4 · No mixer settings, plug-ins or MIDI', foreground='#526578').pack(anchor='w', pady=(8, 4))
-        ttk.Label(frame, text='This version stops a song if it contains unsupported fades, envelopes or audio parts; it never silently drops those clips.',
-                  foreground='#805421', wraplength=1050).pack(anchor='w', pady=(0, 8))
         bar = ttk.Frame(frame)
-        bar.pack(fill='x', pady=(0, 8))
+        bar.pack(fill='x', pady=(8, 8))
         ttk.Label(bar, text='Find folder').pack(side='left', padx=(0, 8))
         ttk.Entry(bar, textvariable=self.search).pack(side='left', fill='x', expand=True)
         self.search.trace_add('write', lambda *_: self.render())
@@ -98,18 +99,23 @@ class App:
         self.tree.bind('<space>', self.toggle_focused)
         self.tree.bind('<<TreeviewSelect>>', self.focus_folder)
         self.icons = [self.checkbox(False), self.checkbox(True)]
-        ttk.Label(right, textvariable=self.title, font=('Segoe UI', 13, 'bold'), wraplength=280).pack(anchor='w')
-        ttk.Label(right, textvariable=self.detail, wraplength=280, foreground='#536579').pack(anchor='w', pady=(6, 12))
+        self.song_title_label = ttk.Label(right, textvariable=self.title, font=('Segoe UI', 13, 'bold'), wraplength=280)
+        self.song_title_label.pack(anchor='w')
+        self.detail_label = ttk.Label(right, textvariable=self.detail, wraplength=280, foreground='#536579')
         ttk.Label(right, text='Song BPM').pack(anchor='w')
         self.bpm_entry = ttk.Entry(right, textvariable=self.bpm, width=16)
-        self.bpm_entry.pack(anchor='w', pady=(4, 6))
+        self.bpm_entry.pack(anchor='w', pady=(4, 12))
         self.bpm.trace_add('write', self.change_bpm)
-        ttk.Label(right, text='Check values inferred from folder names.\nA selected song includes its nested audio tracks.', wraplength=280).pack(anchor='w', pady=(0, 12))
         ttk.Label(right, text='Audio tracks', font=('Segoe UI', 10, 'bold')).pack(anchor='w')
-        self.preview = tk.Text(right, width=30, height=10, wrap='word', relief='flat', bg='white',
+        preview_frame = ttk.Frame(right)
+        preview_frame.pack(fill='both', expand=True, pady=(5, 0))
+        self.preview = tk.Text(preview_frame, width=34, height=1, wrap='word', relief='flat', bg='white',
                                fg='#263b4f', font=('Segoe UI', 9), padx=8, pady=8, state='disabled')
-        self.preview.pack(fill='both', expand=True, pady=(5, 0))
-        bottom = ttk.Frame(frame)
+        preview_scroll = ttk.Scrollbar(preview_frame, orient='vertical', command=self.preview.yview)
+        self.preview.configure(yscrollcommand=preview_scroll.set)
+        preview_scroll.pack(side='right', fill='y')
+        self.preview.pack(fill='both', expand=True)
+        bottom = ttk.Frame(footer)
         bottom.pack(fill='x', pady=(12, 7))
         ttk.Label(bottom, textvariable=self.selection_label).pack(side='left')
         self.export_button = ttk.Button(bottom, text='Export selected songs', style='Accent.TButton', command=self.export, state='disabled')
@@ -118,12 +124,12 @@ class App:
         self.cancel_button.pack(side='right', padx=8)
         self.open_button = ttk.Button(bottom, text='Open output folder', command=self.open_output)
         self.open_button.pack(side='right')
-        self.progress = ttk.Progressbar(frame, mode='determinate', maximum=100)
+        self.progress = ttk.Progressbar(footer, mode='determinate', maximum=100)
         self.progress.pack(fill='x')
-        ttk.Label(frame, textvariable=self.status, wraplength=1080).pack(anchor='w', pady=(5, 2))
-        self.log = tk.Text(frame, height=5, wrap='word', font=('Consolas', 9), relief='flat', bg='#e6edf3', padx=8, pady=6, state='disabled')
+        ttk.Label(footer, textvariable=self.status, wraplength=1080).pack(anchor='w', pady=(5, 2))
+        self.log = tk.Text(footer, height=3, wrap='word', font=('Consolas', 9), relief='flat', bg='#e6edf3', padx=8, pady=6, state='disabled')
         self.log.pack(fill='x', pady=(5, 0))
-        ttk.Label(frame, textvariable=self.summary, foreground='#65778a').pack(anchor='w', pady=(6, 0))
+        ttk.Label(footer, textvariable=self.summary, foreground='#65778a').pack(anchor='w', pady=(6, 0))
         root.after(100, self.poll)
 
     def checkbox(self, checked):
@@ -254,7 +260,12 @@ class App:
         self.editing = selected[0]
         f = self.by_id[self.editing]
         self.title.set(f['name'])
-        self.detail.set(' / '.join(f['path'][:-1]) + '\n' + f['bpm_note'])
+        parent_path = ' / '.join(f['path'][:-1])
+        self.detail.set(parent_path)
+        if parent_path:
+            self.detail_label.pack(anchor='w', pady=(6, 12), after=self.song_title_label)
+        else:
+            self.detail_label.pack_forget()
         self.setting_bpm = True
         self.bpm.set(self.bpms[self.editing])
         self.setting_bpm = False
@@ -408,22 +419,31 @@ def main():
     parser.add_argument('--bpm', type=float)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
-    if args.inspect:
-        reader = Reader(args.inspect)
+    if args.inspect or args.smoke_ui:
+        reader = Reader(args.inspect) if args.inspect else None
+        layout_checks = []
         if args.smoke_ui:
             root = tk.Tk()
-            root.withdraw()
             app = App(root)
-            stamp = reader.path.stat()
-            app.loaded(reader, (stamp.st_size, stamp.st_mtime_ns))
-            first = next(f for f in reader.inventory['folders'] if f['direct_audio_track_count'])
-            app.toggle(first['id'])
-            assert first['id'] in app.selected
-            assert app.tree.exists(first['id'])
-            root.update_idletasks()
+            if reader:
+                stamp = reader.path.stat()
+                app.loaded(reader, (stamp.st_size, stamp.st_mtime_ns))
+                first = next(f for f in reader.inventory['folders'] if f['direct_audio_track_count'])
+                app.toggle(first['id'])
+                assert first['id'] in app.selected
+                assert app.tree.exists(first['id'])
+            for size in ('1160x820', '900x650'):
+                root.geometry(size + '+10000+10000')
+                root.update()
+                button = app.export_button
+                y = button.winfo_rooty() - root.winfo_rooty()
+                assert button.winfo_ismapped(), f'Export button hidden at {size}'
+                assert 0 <= y < y + button.winfo_height() <= root.winfo_height()
+                layout_checks.append(dict(window=size, export_button_visible=True))
             root.destroy()
         if args.report:
-            args.report.write_text(json.dumps(reader.inventory, ensure_ascii=False, indent=2), encoding='utf-8')
+            report = reader.inventory if reader else dict(version=VERSION, layout_checks=layout_checks)
+            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         return
     if args.export_project:
         reader = Reader(args.export_project)

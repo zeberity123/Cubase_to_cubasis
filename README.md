@@ -1,6 +1,8 @@
-﻿# Cubase to Cubasis — Song Exporter 0.3
+﻿# Cubase to Cubasis — Song Exporter 0.3.2
 
 A standalone Windows app that reads a saved Cubase `.cpr`, shows its song folders with checkboxes, and exports each checked song as a separate `.dawproject` containing its audio. It reads the folder tree from the selected project; `song-folders.txt` is not required.
+
+Version 0.3.2 simplifies the interface and gives the Audio tracks list more space, with a scrollbar for longer lists. **Export selected songs** stays visible in smaller windows and with higher Windows display scaling; it becomes available after you check a song folder.
 
 ## Use the Windows app
 
@@ -73,7 +75,7 @@ python -m pip install -r requirements-dev.txt
 .\build_app.ps1
 ```
 
-The build writes `dist/CubaseSongExporter.exe`, the README and runtime notices. The tested build uses Python 3.10.7, NumPy 1.23.5, SoundFile 0.12.1 and PyInstaller 6.11.0. The executable contains Python, Tcl/Tk and the audio runtime.
+The build writes `dist/CubaseSongExporter.exe`, the README and runtime notices. To build separately while an existing executable is running, use `.\build_app.ps1 -OutputDirectory dist\v0.3.2`. The tested build uses Python 3.10.7, NumPy 1.23.5, SoundFile 0.12.1 and PyInstaller 6.11.0. The executable contains Python, Tcl/Tk and the audio runtime.
 
 Tests cover clip cuts/positions, source trims, Unicode names/paths, media references, PCM reconstruction, float audio, cancellation, overwrite protection, unsupported edits and the private project's hierarchy. Private sample tests skip when their source files are unavailable. `CUBASIS_PRIVATE_CPR` optionally points to the original private regression CPR; those tests are fixture-specific, not checks for an arbitrary project. XML regression fixtures belong in the ignored `sample/` directory.
 
